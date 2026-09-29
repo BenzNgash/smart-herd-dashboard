@@ -80,6 +80,12 @@ const num = (v, d = 2) =>
     : '—'
 
 
+const score = (v, d = 1) =>
+  Number.isFinite(Number(v))
+    ? Number(v).toFixed(d)
+    : '—'
+
+
 const ageMin = (v) =>
   v
     ? Math.max(
@@ -327,6 +333,9 @@ export default function App() {
   const [preds, setPreds] =
     useState([])
 
+  const [m3Preds, setM3Preds] =
+    useState([])
+
   const [env, setEnv] =
     useState([])
 
@@ -338,6 +347,9 @@ export default function App() {
     useState([])
 
   const [predHistory, setPredHistory] =
+    useState([])
+
+  const [m3History, setM3History] =
     useState([])
 
   const [health, setHealth] =
@@ -372,6 +384,13 @@ export default function App() {
     useMemo(
       () => latestByCow(preds),
       [preds]
+    )
+
+
+  const latestM3 =
+    useMemo(
+      () => latestByCow(m3Preds),
+      [m3Preds]
     )
 
 
@@ -429,6 +448,7 @@ export default function App() {
       x,
       y,
       p,
+      m3,
       e
     ] =
       await Promise.all([
@@ -481,6 +501,18 @@ export default function App() {
 
 
         supabase
+          .from('health_anomaly_predictions')
+          .select('*')
+          .order(
+            'inference_run_at',
+            {
+              ascending: false
+            }
+          )
+          .limit(1000),
+
+
+        supabase
           .from('environment_readings')
           .select('*')
           .order(
@@ -500,6 +532,7 @@ export default function App() {
         x.error,
         y.error,
         p.error,
+        m3.error,
         e.error
       ].find(Boolean)
 
@@ -526,6 +559,10 @@ export default function App() {
 
       setPreds(
         p.data || []
+      )
+
+      setM3Preds(
+        m3.data || []
       )
 
       setEnv(
@@ -570,7 +607,8 @@ export default function App() {
 
       const [
         h,
-        p
+        p,
+        m3
       ] =
         await Promise.all([
 
@@ -636,7 +674,49 @@ export default function App() {
                 ascending: true
               }
             )
-            .limit(200)
+            .limit(200),
+
+
+          supabase
+            .from(
+              'health_anomaly_predictions'
+            )
+            .select(
+              `
+              ts,
+              inference_run_at,
+              priority_score,
+              status,
+              actionable,
+              decision_path,
+              supervised_score,
+              novelty_score,
+              baseline_quality,
+              data_quality,
+              persistence_hours,
+              primary_reason,
+              secondary_reason,
+              model_version
+              `
+            )
+            .eq(
+              'cow_id',
+              cow
+            )
+            .gte(
+              'inference_run_at',
+              new Date(
+                Date.now() -
+                48 * 3600 * 1000
+              ).toISOString()
+            )
+            .order(
+              'inference_run_at',
+              {
+                ascending: true
+              }
+            )
+            .limit(100)
 
         ])
 
@@ -689,6 +769,35 @@ export default function App() {
               prob:
                 +r.probability *
                 100
+
+            }))
+        )
+      }
+
+
+      if (!m3.error) {
+
+        setM3History(
+
+          (m3.data || [])
+            .map((r) => ({
+
+              ...r,
+
+              time:
+                fmtTime(
+                  r.inference_run_at ||
+                  r.ts
+                ),
+
+              priority:
+                +r.priority_score,
+
+              supervised:
+                +r.supervised_score,
+
+              novelty:
+                +r.novelty_score
 
             }))
         )
@@ -833,6 +942,17 @@ export default function App() {
               event: '*',
               schema: 'public',
               table:
+                'health_anomaly_predictions'
+            },
+            scheduleRefresh
+          )
+
+          .on(
+            'postgres_changes',
+            {
+              event: '*',
+              schema: 'public',
+              table:
                 'environment_readings'
             },
             scheduleRefresh
@@ -943,6 +1063,12 @@ export default function App() {
     ]
 
 
+  const currentM3 =
+    latestM3[
+      selectedCow
+    ]
+
+
   const newest5 =
     b5[0]
 
@@ -953,6 +1079,10 @@ export default function App() {
 
   const newestPred =
     preds[0]
+
+
+  const newestM3 =
+    m3Preds[0]
 
 
   // ==========================================================
@@ -987,6 +1117,31 @@ export default function App() {
     ) <= 35
 
 
+  const model3Ok =
+    ageMin(
+      newestM3?.inference_run_at ||
+      newestM3?.created_at ||
+      newestM3?.ts
+    ) <= 95
+
+
+  const m2SelfTest =
+    health?.models?.model2
+      ?.self_test?.passed ??
+    health?.self_test?.passed
+
+
+  const m3SelfTest =
+    health?.models?.model3
+      ?.self_test?.passed
+
+
+  const renderOk =
+    health?.ok &&
+    m2SelfTest &&
+    m3SelfTest
+
+
   const logout =
     () =>
       supabase.auth
@@ -1014,7 +1169,7 @@ export default function App() {
             </strong>
 
             <span className="shadow">
-              MODEL 2 SHADOW
+              MODELS 2 + 3 SHADOW
             </span>
 
           </div>
@@ -1205,28 +1360,52 @@ export default function App() {
 
             <StatusCard
 
+              icon={ShieldCheck}
+
+              label="Model 3 shadow"
+
+              status={
+                model3Ok
+                  ? 'LIVE'
+                  : 'STALE'
+              }
+
+              ok={
+                model3Ok
+              }
+
+              detail={
+                newestM3
+                  ? `Latest run ${fmt(
+                      newestM3.inference_run_at ||
+                      newestM3.created_at ||
+                      newestM3.ts
+                    )}`
+                  : 'No health anomaly predictions yet'
+              }
+
+            />
+
+
+            <StatusCard
+
               icon={Cloud}
 
               label="Render AI service"
 
               status={
-                health?.ok
+                renderOk
                   ? 'HEALTHY'
                   : 'CHECK'
               }
 
               ok={
-                health?.ok
+                renderOk
               }
 
               detail={
                 health?.ok
-                  ? `XGBoost self-test ${
-                      health?.self_test
-                        ?.passed
-                        ? 'passed'
-                        : 'failed'
-                    }`
+                  ? `Model 2 ${m2SelfTest ? '✓' : '✕'} · Model 3 ${m3SelfTest ? '✓' : '✕'}`
                   : (
                       health?.error ||
                       'Health check pending'
@@ -1590,6 +1769,176 @@ export default function App() {
 
             </div>
 
+
+            {/* MODEL 3 */}
+
+            <div className="subpanel model3">
+
+              <div className="model2-head">
+
+                <div>
+
+                  <p className="muted">
+                    Model 3
+                  </p>
+
+                  <h3>
+                    Health anomaly monitor
+                  </h3>
+
+                </div>
+
+
+                <span
+                  className={
+                    `health-state ${String(
+                      currentM3?.status ||
+                      'normal'
+                    ).toLowerCase()}`
+                  }
+                >
+                  {currentM3?.status ||
+                    'NO DATA'}
+                </span>
+
+              </div>
+
+
+              <div className="big-number">
+
+                {currentM3
+                  ? score(
+                      currentM3
+                        .priority_score,
+                      1
+                    )
+                  : '—'
+                }
+
+                {currentM3 && (
+                  <span className="score-denom">
+                    {' '} / 100
+                  </span>
+                )}
+
+              </div>
+
+
+              <div className="track anomaly-score">
+
+                <div
+                  className="fill"
+                  style={{
+                    width:
+                      `${
+                        Math.min(
+                          100,
+                          +currentM3
+                            ?.priority_score ||
+                          0
+                        )
+                      }%`
+                  }}
+                />
+
+              </div>
+
+
+              <div className="model3-score-grid">
+
+                <div>
+                  <span>Supervised</span>
+                  <strong>
+                    {score(
+                      currentM3
+                        ?.supervised_score,
+                      1
+                    )}
+                  </strong>
+                </div>
+
+                <div>
+                  <span>Novelty</span>
+                  <strong>
+                    {score(
+                      currentM3
+                        ?.novelty_score,
+                      2
+                    )}
+                  </strong>
+                </div>
+
+                <div>
+                  <span>Baseline</span>
+                  <strong>
+                    {pct(
+                      currentM3
+                        ?.baseline_quality
+                    )}
+                  </strong>
+                </div>
+
+                <div>
+                  <span>Persistence</span>
+                  <strong>
+                    {currentM3
+                      ?.persistence_hours !=
+                    null
+                      ? `${currentM3.persistence_hours} h`
+                      : '—'
+                    }
+                  </strong>
+                </div>
+
+              </div>
+
+
+              <div className="reason-box">
+
+                <strong>
+                  {currentM3
+                    ?.primary_reason ||
+                    'No anomaly explanation yet'}
+                </strong>
+
+                {currentM3
+                  ?.secondary_reason && (
+                  <small>
+                    {currentM3.secondary_reason}
+                  </small>
+                )}
+
+              </div>
+
+
+              <div className="threshold-note">
+                <strong>Decision thresholds</strong>
+                <span>
+                  WATCH ≥ 97 · CHECK ≥ 99.5 with persistence
+                </span>
+                <span>
+                  Novelty ≥ 99.8 plus deviation support and persistence
+                </span>
+                <small>
+                  Priority score is for display; status is determined by branch-specific rules.
+                </small>
+              </div>
+
+
+              <small>
+                {currentM3
+                  ?.model_version ||
+                  'No Model 3 prediction yet'
+                }
+              </small>
+
+
+              <div className="warning">
+                Research observation-priority signal only — no disease diagnosis.
+              </div>
+
+            </div>
+
           </div>
 
         </section>
@@ -1766,6 +2115,81 @@ export default function App() {
 
           </article>
 
+
+          {/* MODEL 3 HISTORY */}
+
+          <article className="panel model3-history">
+
+            <p className="eyebrow">
+              MODEL 3 HISTORY · LAST 48 HOURS
+            </p>
+
+            <h3>
+              Health anomaly scores
+            </h3>
+
+
+            <div className="chart">
+
+              <ResponsiveContainer
+                width="100%"
+                height={290}
+              >
+
+                <LineChart
+                  data={m3History}
+                >
+
+                  <CartesianGrid
+                    strokeDasharray="3 3"
+                    opacity={0.12}
+                  />
+
+                  <XAxis
+                    dataKey="time"
+                    minTickGap={28}
+                  />
+
+                  <YAxis
+                    domain={[0, 100]}
+                  />
+
+                  <Tooltip />
+
+                  <Legend />
+
+                  <Line
+                    dataKey="priority"
+                    name="Priority"
+                    stroke="#22d3ee"
+                    dot={false}
+                    strokeWidth={2.5}
+                  />
+
+                  <Line
+                    dataKey="supervised"
+                    name="Supervised"
+                    stroke="#a78bfa"
+                    dot={false}
+                    strokeWidth={1.8}
+                  />
+
+                  <Line
+                    dataKey="novelty"
+                    name="Novelty"
+                    stroke="#fb7185"
+                    dot={false}
+                    strokeWidth={1.8}
+                  />
+
+                </LineChart>
+
+              </ResponsiveContainer>
+
+            </div>
+
+          </article>
+
         </section>
 
 
@@ -1822,6 +2246,14 @@ export default function App() {
                   </th>
 
                   <th>
+                    Model 3
+                  </th>
+
+                  <th>
+                    M3 score
+                  </th>
+
+                  <th>
                     Baseline
                   </th>
 
@@ -1847,6 +2279,12 @@ export default function App() {
 
                     const p =
                       latestPred[
+                        c.cow_id
+                      ]
+
+
+                    const m3 =
+                      latestM3[
                         c.cow_id
                       ]
 
@@ -1942,7 +2380,40 @@ export default function App() {
 
                         <td>
 
+                          {m3
+                            ? (
+                              <span
+                                className={
+                                  `health-state compact ${String(
+                                    m3.status ||
+                                    'normal'
+                                  ).toLowerCase()}`
+                                }
+                              >
+                                {m3.status}
+                              </span>
+                            )
+                            : '—'
+                          }
+
+                        </td>
+
+
+                        <td>
+                          {m3
+                            ? score(
+                                m3.priority_score,
+                                1
+                              )
+                            : '—'
+                          }
+                        </td>
+
+
+                        <td>
+
                           {pct(
+                            m3?.baseline_quality ??
                             p?.baseline_quality
                           )}
 
@@ -1952,6 +2423,8 @@ export default function App() {
                         <td>
 
                           {fmt(
+                            m3?.inference_run_at ||
+                            p?.created_at ||
                             b?.ts ||
                             p?.ts
                           )}
